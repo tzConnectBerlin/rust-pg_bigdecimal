@@ -1,0 +1,15 @@
+[package]
+name = "pgnumeric"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytes = "1.1.0"
+bigdecimal = "0.2.1"
+num = { version = "0.4", features = [ "serde" ] }
+postgres = { version = "0.19.1", path = "../rust-postgres/postgres", features = [ "with-chrono-0_4" ] }
+postgres-native-tls = "0.5.0"
+anyhow = "1.0"
+native-tls = "0.2.7"
