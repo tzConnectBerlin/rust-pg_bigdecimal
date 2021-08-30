@@ -1,139 +1,9 @@
-use anyhow::{anyhow, Result};
-
-use postgres::{Client, NoTls};
-
 use bytes::{BufMut, BytesMut};
 use postgres::types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 use std::convert::TryInto;
 
 use bigdecimal::BigDecimal;
 use num::{BigInt, BigUint, Integer};
-use std::str::FromStr;
-
-fn main() {
-    let mut dbconn = connect(
-        //        "host=192.168.8.129 dbname=test user=newby password=foobar port=5432",
-        "host=0.0.0.0 user=postgres password=admin port=15432",
-        false,
-        None,
-    )
-    .unwrap();
-
-    let tests = &[
-        "10",
-        "100",
-        "1000",
-        "10000",
-        "10100",
-        "30109",
-        "0.1",
-        "0.01",
-        "0.001",
-        "0.0001",
-        "0.00001",
-        "0.0000001",
-        "1.1",
-        "1.001",
-        "1.00001",
-        "3.14159265",
-        "98756756756756756756756757657657656756756756756757656745644534534535435434567567656756757658787687676855674456345345364564.5675675675765765765765765756",
-"204093200000000000000000000000000000000",
-        "nan"
-    ];
-    for n in tests {
-        println!("\n----\ntesting: {}", n);
-        let t = 103;
-        let n = match n {
-            &"nan" => PgNumeric { n: None },
-            _ => PgNumeric {
-                n: Some(BigDecimal::from_str(n).unwrap()),
-            },
-        };
-
-        dbconn
-            .execute(
-                "
-DELETE FROM foobar;
-",
-                &[],
-            )
-            .unwrap();
-
-        dbconn
-            .execute(
-                "
-INSERT INTO foobar (i, n)
-VALUES ($1, $2)",
-                &[&t, &n],
-            )
-            .unwrap();
-
-        println!(">>>");
-
-        for row in dbconn
-            .query(
-                "
-SELECT id, n
-FROM foobar
-",
-                &[],
-            )
-            .unwrap()
-        {
-            let id: Option<i32> = row.get(0);
-            let got: Option<PgNumeric> = row.get(1);
-            println!("{:?}: {:?}", id, got);
-            assert_eq!(n.n, got.unwrap().n);
-        }
-    }
-
-    for n in tests {
-        if n == &"nan" {
-            continue;
-        }
-        let t = 103;
-        let n = PgNumeric {
-            n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
-        };
-        println!("\n----\ntesting: {:?}", n.n);
-
-        dbconn
-            .execute(
-                "
-DELETE FROM foobar;
-",
-                &[],
-            )
-            .unwrap();
-
-        dbconn
-            .execute(
-                "
-INSERT INTO foobar (i, n)
-VALUES ($1, $2)",
-                &[&t, &n],
-            )
-            .unwrap();
-
-        println!(">>>");
-
-        for row in dbconn
-            .query(
-                "
-SELECT id, n
-FROM foobar
-",
-                &[],
-            )
-            .unwrap()
-        {
-            let id: Option<i32> = row.get(0);
-            let got: Option<PgNumeric> = row.get(1);
-            println!("{:?}: {:?}", id, got);
-            assert_eq!(n.n, got.unwrap().n);
-        }
-    }
-}
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct PgNumeric {
@@ -166,10 +36,10 @@ impl<'a> FromSql<'a> for PgNumeric {
         };
         let scale = rdr.read_u16::<BigEndian>()?;
 
-        let mut unsigned = BigUint::from(0u32);
+        let mut biguint = BigUint::from(0u32);
         for n in (0..n_digits).rev() {
             let digit = rdr.read_u16::<BigEndian>()?;
-            unsigned += BigUint::from(digit) * BigUint::from(10_000u32).pow(n as u32);
+            biguint += BigUint::from(digit) * BigUint::from(10_000u32).pow(n as u32);
         }
 
         // First digit in unsigned now has factor 10_000^(digits.len() - 1),
@@ -179,7 +49,7 @@ impl<'a> FromSql<'a> for PgNumeric {
         // that provides the same translation from Postgres numeric into their
         // related rust type.
         let correction_exp = 4 * (i64::from(weight) - i64::from(n_digits) + 1);
-        let res = BigDecimal::new(BigInt::from_biguint(sign, unsigned), -correction_exp)
+        let res = BigDecimal::new(BigInt::from_biguint(sign, biguint), -correction_exp)
             .with_scale(i64::from(scale));
 
         Ok(Self { n: Some(res) })
@@ -196,17 +66,19 @@ impl ToSql for PgNumeric {
         _: &Type,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + 'static + Sync + Send>> {
-        fn base10000(mut n: BigUint) -> Vec<i16> {
+        fn base10000(
+            mut n: BigUint,
+        ) -> Result<Vec<i16>, Box<dyn std::error::Error + 'static + Sync + Send>> {
             let mut res: Vec<i16> = vec![];
 
             while n != BigUint::from(0_u32) {
                 let (remainder, digit) = n.div_rem(&BigUint::from(10_000u32));
-                res.push(digit.try_into().unwrap());
+                res.push(digit.try_into()?);
                 n = remainder;
             }
 
             res.reverse();
-            res
+            Ok(res)
         }
         fn strip_trailing_zeroes(digits: &mut Vec<i16>) {
             let mut last_nonzero_idx = 0;
@@ -241,7 +113,7 @@ impl ToSql for PgNumeric {
                 let scale: i16 = exponent.try_into()?;
 
                 let (integer, decimal) = biguint.div_rem(&BigUint::from(10u32).pow(scale as u32));
-                let mut integer_digits: Vec<i16> = base10000(integer);
+                let integer_digits: Vec<i16> = base10000(integer)?;
                 let mut weight = integer_digits.len().try_into().map(|len: i16| len - 1)?;
 
                 // must shift decimal part to align the decimal point between 2 10000
@@ -249,32 +121,33 @@ impl ToSql for PgNumeric {
                 // shifted modulo by 1 (resulting in (0..4] instead of [0..4) ranges)
                 let decimal =
                     decimal * BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
-                let decimal_digits = base10000(decimal);
+                let decimal_digits = base10000(decimal)?;
 
                 let have_decimals_weight: i16 = decimal_digits.len().try_into()?;
                 // /4 shifted by -1 to shift increments to <multiples of 4 + 1>
                 let want_decimals_weight = 1 + (scale - 1) / 4;
                 let correction_weight = want_decimals_weight - have_decimals_weight;
-                if integer_digits.len() == 0 {
+                let mut decimal_zeroes_prefix: Vec<i16> = vec![];
+                if integer_digits.is_empty() {
                     // if we have no integer part, can simply set weight to -
                     weight -= correction_weight;
                 } else {
                     // if we do have an integer part, cannot safe space. we'll have to
                     // prefix the decimal with 0 digits
-                    //
-                    // Note: we append to the integer digits but it's effectively
-                    // creating a prefix for the decimal part
-                    integer_digits
-                        .extend(std::iter::repeat(0_i16).take(correction_weight.try_into()?));
+                    decimal_zeroes_prefix = std::iter::repeat(0_i16)
+                        .take(correction_weight.try_into()?)
+                        .collect();
                 }
 
                 let mut digits: Vec<i16> = vec![];
                 digits.extend(integer_digits);
+                digits.extend(decimal_zeroes_prefix);
                 digits.extend(decimal_digits);
                 strip_trailing_zeroes(&mut digits);
 
                 let n_digits = digits.len();
-                // 8 bytes for the header (4 * 2byte numbers), + 2 bytes per digit
+                // 8 bytes for the header (4 * 2byte numbers)
+                // + 2 bytes per digit
                 out.reserve(8 + n_digits * 2);
 
                 // write the header
@@ -300,18 +173,74 @@ impl ToSql for PgNumeric {
     to_sql_checked!();
 }
 
-fn connect(url: &str, ssl: bool, _ca_cert: Option<String>) -> Result<Client> {
-    if ssl {
-        Err(anyhow!(""))
-        //    let mut builder = TlsConnector::builder();
-        //    if let Some(ca_cert) = ca_cert {
-        //        builder.add_root_certificate(Certificate::from_pem(&fs::read(ca_cert)?)?);
-        //    }
-        //    let connector = builder.build()?;
-        //    let connector = MakeTlsConnector::new(connector);
+#[test]
+fn integration() {
+    use postgres::{Client, NoTls};
+    use std::str::FromStr;
 
-        //    Ok(postgres::Client::connect(url, connector)?)
-    } else {
-        Ok(Client::connect(url, NoTls)?)
+    let mut dbconn = Client::connect(
+        "host=0.0.0.0 user=test password=test dbname=test port=15432",
+        NoTls,
+    )
+    .unwrap();
+
+    dbconn
+        .execute("CREATE TABLE IF NOT EXISTS foobar (n numeric)", &[])
+        .unwrap();
+
+    let mut test_for_pgnumeric = |pgnumeric| {
+        dbconn.execute("DELETE FROM foobar;", &[]).unwrap();
+        dbconn
+            .execute("INSERT INTO foobar VALUES ($1)", &[&pgnumeric])
+            .unwrap();
+
+        let got: Option<PgNumeric> = dbconn
+            .query_one("SELECT n FROM foobar", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(pgnumeric, got.unwrap());
+    };
+
+    let tests = &[
+        "10",
+        "100",
+        "1000",
+        "10000",
+        "10100",
+        "30109",
+        "0.1",
+        "0.01",
+        "0.001",
+        "0.0001",
+        "0.00001",
+        "0.0000001",
+        "1.1",
+        "1.001",
+        "1.00001",
+        "3.14159265",
+        "98756756756756756756756757657657656756756756756757656745644534534535435434567567656756757658787687676855674456345345364564.5675675675765765765765765756",
+"204093200000000000000000000000000000000",
+        "nan"
+    ];
+    for n in tests {
+        let n = match n {
+            &"nan" => PgNumeric { n: None },
+            _ => PgNumeric {
+                n: Some(BigDecimal::from_str(n).unwrap()),
+            },
+        };
+
+        test_for_pgnumeric(n);
+    }
+
+    for n in tests {
+        if n == &"nan" {
+            continue;
+        }
+
+        let n = PgNumeric {
+            n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
+        };
+        test_for_pgnumeric(n);
     }
 }
