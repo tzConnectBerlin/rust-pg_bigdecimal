@@ -7,7 +7,7 @@ use postgres::types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 use std::convert::TryInto;
 
 use bigdecimal::BigDecimal;
-use num::{BigInt, BigUint};
+use num::{BigInt, BigUint, Integer};
 use std::str::FromStr;
 
 fn main() {
@@ -42,7 +42,7 @@ fn main() {
     for n in tests {
         println!("\n----\ntesting: {}", n);
         let t = 103;
-        let n = Numeric {
+        let n = PgNumeric {
             n: Some(BigDecimal::from_str(n).unwrap()),
         };
 
@@ -77,7 +77,7 @@ FROM foobar
             .unwrap()
         {
             let id: Option<i32> = row.get(0);
-            let got: Option<Numeric> = row.get(1);
+            let got: Option<PgNumeric> = row.get(1);
             println!("{:?}: {:?}", id, got);
             assert_eq!(n.n, got.unwrap().n);
         }
@@ -85,7 +85,7 @@ FROM foobar
 
     for n in tests {
         let t = 103;
-        let n = Numeric {
+        let n = PgNumeric {
             n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
         };
         println!("\n----\ntesting: {:?}", n.n);
@@ -121,7 +121,7 @@ FROM foobar
             .unwrap()
         {
             let id: Option<i32> = row.get(0);
-            let got: Option<Numeric> = row.get(1);
+            let got: Option<PgNumeric> = row.get(1);
             println!("{:?}: {:?}", id, got);
             assert_eq!(n.n, got.unwrap().n);
         }
@@ -129,14 +129,14 @@ FROM foobar
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
-pub struct Numeric {
+pub struct PgNumeric {
     pub n: Option<BigDecimal>,
 }
 
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
-impl<'a> FromSql<'a> for Numeric {
+impl<'a> FromSql<'a> for PgNumeric {
     fn from_sql(
         _: &Type,
         raw: &'a [u8],
@@ -151,47 +151,20 @@ impl<'a> FromSql<'a> for Numeric {
             0xC000 => return Ok(Self { n: None }),
             _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "").into()),
         };
-        let mut scale = rdr.read_u16::<BigEndian>()? as i16;
+        let scale = rdr.read_u16::<BigEndian>()?;
 
-        println!(
-            "sign={:?}, scale={}, weight={}, n_digits={}",
-            sign, scale, weight, n_digits
-        );
-
-        let w_offset = weight - (n_digits - 1) as i16;
-        println!("w_offset: {}", w_offset);
-
-        let mut unsigned = BigUint::from(0 as u32);
+        let mut unsigned = BigUint::from(0u32);
         for n in (0..n_digits).rev() {
             let digit = rdr.read_i16::<BigEndian>()?;
-            println!("digit: {}", digit);
-            //let mut w = BigUint::from(10u32).pow(n as u32);
-            //if n < n_digits - scale {
-            println!("n: {}", n);
-            let w = BigUint::from(10_000u32).pow(n as u32);
-            //}
-            unsigned += BigUint::from(digit as u16) * w;
+            unsigned += BigUint::from(digit as u16) * BigUint::from(10_000u32).pow(n as u32);
         }
-        println!("unsigned: {}", unsigned);
 
-        /*
-        let mut bi = BigInt::from_biguint(sign, unsigned);
-        //if weight < 0 {
-        //    scale =
-        //}
-        let orig_scale = scale;
-        if w_offset >= 0 {
-            bi *= BigInt::from(10_000u32).pow(w_offset as u32);
-        } else {
-            //scale += 5 * (w_offset * -1);
-        }
-        let mut res = BigDecimal::new(bi, scale as i64); // .with_scale(orig_scale as i64);
-                                                         if w_offset < 0 {
-                                                             res = res / BigDecimal::new(BigInt::from(10_000u32).pow((w_offset * -1) as u32), 0);
-                                                         }
-                                                         */
-
-        // First digit got factor 10_000^(digits.len() - 1), but should get 10_000^weight
+        // First digit in unsigned now has factor 10_000^(digits.len() - 1),
+        // but should have 10_000^weight
+        //
+        // Credits: this logic has been copied from rust Diesel's related code
+        // provides the same translation from Postgres numeric into their related
+        // rust type.
         let correction_exp = 4 * (i64::from(weight) - i64::from(n_digits) + 1);
         let res = BigDecimal::new(BigInt::from_biguint(sign, unsigned), -correction_exp)
             .with_scale(i64::from(scale));
@@ -204,78 +177,71 @@ impl<'a> FromSql<'a> for Numeric {
     }
 }
 
-impl ToSql for Numeric {
+impl ToSql for PgNumeric {
     fn to_sql(
         &self,
         _: &Type,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + 'static + Sync + Send>> {
+        fn base10000(mut n: BigUint) -> Vec<i16> {
+            let mut res: Vec<i16> = vec![];
+
+            while n != BigUint::from(0_u32) {
+                let (remainder, digit) = n.div_rem(&BigUint::from(10_000u32));
+                res.push(digit.try_into().unwrap());
+                n = remainder;
+            }
+
+            res.reverse();
+            res
+        }
+
         let (bigint, exponent) = self.n.as_ref().unwrap().as_bigint_and_exponent();
         let (sign, biguint) = bigint.into_parts();
         let neg = sign == num::bigint::Sign::Minus;
-
         let scale: i16 = exponent.try_into().unwrap();
 
-        // This doesn't work yet: bigint operations
-        let mut digits: Vec<i16> = vec![];
-        let mut decimal = biguint.clone() % BigUint::from(10u32).pow(scale as u32);
-        println!("frac: {}", decimal);
-        decimal *= BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
-        println!("frac: {}", decimal);
-        let zero = BigUint::from(0_u32);
-        while decimal != zero {
-            digits.push(
-                (decimal.clone() % BigUint::from(10_000u32))
-                    .try_into()
-                    .unwrap(),
-            );
-            decimal /= BigUint::from(10_000u32);
-        }
+        let (integer, decimal) = biguint.div_rem(&BigUint::from(10u32).pow(scale as u32));
+        let mut integer_digits: Vec<i16> = base10000(integer);
+        let mut weight = integer_digits.len() as i16 - 1;
 
-        println!("scale: {}", scale);
-        let mut integer = biguint.clone() / BigUint::from(10u32).pow(scale as u32);
-        // scale/4 - digits.len()
-        let mut weight: i16 = -1;
+        // must shift decimal part to align the decimal point between 2 10000
+        // based digits.
+        // shifted modulo by 1 (resulting in (0..4] instead of [0..4) ranges)
+        let decimal = decimal * BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
+        let decimal_digits = base10000(decimal);
 
-        let n = digits.len() as i16;
-        let m = 1 + ((scale - 1) as i16) / 4;
-        println!("{}, {}", n, m);
-        if integer == zero {
-            weight -= m - n;
+        let have_decimals_weight = decimal_digits.len() as i16;
+        // /4 shifted by -1 to shift increments to <multiples of 4 + 1>
+        let want_decimals_weight = 1 + ((scale - 1) as i16) / 4;
+        let correction_weight = want_decimals_weight - have_decimals_weight;
+        if integer_digits.len() == 0 {
+            // if we have no integer part, can simply set weight to -
+            weight -= correction_weight;
         } else {
-            digits.extend(std::iter::repeat(0 as i16).take((m - n) as usize));
-            while integer != zero {
-                digits.push(
-                    (integer.clone() % BigUint::from(10_000u32))
-                        .try_into()
-                        .unwrap(),
-                );
-                integer /= BigUint::from(10_000u32);
-                weight += 1;
-            }
+            // if we do have an integer part, cannot safe space. we'll have to
+            // prefix the decimal with 0 digits
+            //
+            // Note: we append to the integer digits but it's effectively
+            // creating a prefix for the decimal part
+            integer_digits.extend(std::iter::repeat(0_i16).take(correction_weight as usize));
         }
-        digits.reverse();
-        println!("..{:?}", digits);
 
-        println!(
-            "neg={}, scale={}, weight={}, digits={:?}",
-            neg, scale, weight, digits
-        );
+        let mut digits: Vec<i16> = vec![];
+        digits.extend(integer_digits);
+        digits.extend(decimal_digits);
 
         let num_digits = digits.len();
-
-        // Reserve bytes
+        // 8 bytes for the header (4 * 2byte numbers), + 2 bytes per digit
         out.reserve(8 + num_digits * 2);
 
-        // Number of groups
+        // write the header
         out.put_u16(num_digits.try_into().unwrap());
-        // Weight of first group
         out.put_i16(weight);
-        // Sign
         out.put_u16(if neg { 0x4000 } else { 0x0000 });
-        // DScale
         out.put_u16(scale as u16);
-        // Now process the number
+
+        // write the body
         for digit in digits[0..num_digits].iter() {
             out.put_i16(*digit);
         }
