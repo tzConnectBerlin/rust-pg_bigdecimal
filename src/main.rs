@@ -38,12 +38,16 @@ fn main() {
         "3.14159265",
         "98756756756756756756756757657657656756756756756757656745644534534535435434567567656756757658787687676855674456345345364564.5675675675765765765765765756",
 "204093200000000000000000000000000000000",
+        "nan"
     ];
     for n in tests {
         println!("\n----\ntesting: {}", n);
         let t = 103;
-        let n = PgNumeric {
-            n: Some(BigDecimal::from_str(n).unwrap()),
+        let n = match n {
+            &"nan" => PgNumeric { n: None },
+            _ => PgNumeric {
+                n: Some(BigDecimal::from_str(n).unwrap()),
+            },
         };
 
         dbconn
@@ -84,6 +88,9 @@ FROM foobar
     }
 
     for n in tests {
+        if n == &"nan" {
+            continue;
+        }
         let t = 103;
         let n = PgNumeric {
             n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
@@ -133,6 +140,12 @@ pub struct PgNumeric {
     pub n: Option<BigDecimal>,
 }
 
+impl PgNumeric {
+    pub fn is_nan(&self) -> bool {
+        self.n.is_none()
+    }
+}
+
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
@@ -155,16 +168,16 @@ impl<'a> FromSql<'a> for PgNumeric {
 
         let mut unsigned = BigUint::from(0u32);
         for n in (0..n_digits).rev() {
-            let digit = rdr.read_i16::<BigEndian>()?;
-            unsigned += BigUint::from(digit as u16) * BigUint::from(10_000u32).pow(n as u32);
+            let digit = rdr.read_u16::<BigEndian>()?;
+            unsigned += BigUint::from(digit) * BigUint::from(10_000u32).pow(n as u32);
         }
 
         // First digit in unsigned now has factor 10_000^(digits.len() - 1),
         // but should have 10_000^weight
         //
         // Credits: this logic has been copied from rust Diesel's related code
-        // provides the same translation from Postgres numeric into their related
-        // rust type.
+        // that provides the same translation from Postgres numeric into their
+        // related rust type.
         let correction_exp = 4 * (i64::from(weight) - i64::from(n_digits) + 1);
         let res = BigDecimal::new(BigInt::from_biguint(sign, unsigned), -correction_exp)
             .with_scale(i64::from(scale));
@@ -195,58 +208,89 @@ impl ToSql for PgNumeric {
             res.reverse();
             res
         }
-
-        let (bigint, exponent) = self.n.as_ref().unwrap().as_bigint_and_exponent();
-        let (sign, biguint) = bigint.into_parts();
-        let neg = sign == num::bigint::Sign::Minus;
-        let scale: i16 = exponent.try_into().unwrap();
-
-        let (integer, decimal) = biguint.div_rem(&BigUint::from(10u32).pow(scale as u32));
-        let mut integer_digits: Vec<i16> = base10000(integer);
-        let mut weight = integer_digits.len() as i16 - 1;
-
-        // must shift decimal part to align the decimal point between 2 10000
-        // based digits.
-        // shifted modulo by 1 (resulting in (0..4] instead of [0..4) ranges)
-        let decimal = decimal * BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
-        let decimal_digits = base10000(decimal);
-
-        let have_decimals_weight = decimal_digits.len() as i16;
-        // /4 shifted by -1 to shift increments to <multiples of 4 + 1>
-        let want_decimals_weight = 1 + ((scale - 1) as i16) / 4;
-        let correction_weight = want_decimals_weight - have_decimals_weight;
-        if integer_digits.len() == 0 {
-            // if we have no integer part, can simply set weight to -
-            weight -= correction_weight;
-        } else {
-            // if we do have an integer part, cannot safe space. we'll have to
-            // prefix the decimal with 0 digits
-            //
-            // Note: we append to the integer digits but it's effectively
-            // creating a prefix for the decimal part
-            integer_digits.extend(std::iter::repeat(0_i16).take(correction_weight as usize));
+        fn strip_trailing_zeroes(digits: &mut Vec<i16>) {
+            let mut last_nonzero_idx = 0;
+            for (i, d) in digits.iter().enumerate().rev() {
+                last_nonzero_idx = i;
+                if *d != 0 {
+                    break;
+                }
+            }
+            digits.truncate(last_nonzero_idx + 1);
         }
 
-        let mut digits: Vec<i16> = vec![];
-        digits.extend(integer_digits);
-        digits.extend(decimal_digits);
+        match &self.n {
+            None => {
+                // 8 bytes for the header (4 * 2byte numbers)
+                out.reserve(8);
 
-        let num_digits = digits.len();
-        // 8 bytes for the header (4 * 2byte numbers), + 2 bytes per digit
-        out.reserve(8 + num_digits * 2);
+                // write the header
+                out.put_u16(0);
+                out.put_i16(0);
+                out.put_u16(0xC000);
+                out.put_u16(0);
 
-        // write the header
-        out.put_u16(num_digits.try_into().unwrap());
-        out.put_i16(weight);
-        out.put_u16(if neg { 0x4000 } else { 0x0000 });
-        out.put_u16(scale as u16);
+                // no body for nan
 
-        // write the body
-        for digit in digits[0..num_digits].iter() {
-            out.put_i16(*digit);
+                Ok(IsNull::No)
+            }
+            Some(n) => {
+                let (bigint, exponent) = n.as_bigint_and_exponent();
+                let (sign, biguint) = bigint.into_parts();
+                let neg = sign == num::bigint::Sign::Minus;
+                let scale: i16 = exponent.try_into()?;
+
+                let (integer, decimal) = biguint.div_rem(&BigUint::from(10u32).pow(scale as u32));
+                let mut integer_digits: Vec<i16> = base10000(integer);
+                let mut weight = integer_digits.len().try_into().map(|len: i16| len - 1)?;
+
+                // must shift decimal part to align the decimal point between 2 10000
+                // based digits.
+                // shifted modulo by 1 (resulting in (0..4] instead of [0..4) ranges)
+                let decimal =
+                    decimal * BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
+                let decimal_digits = base10000(decimal);
+
+                let have_decimals_weight: i16 = decimal_digits.len().try_into()?;
+                // /4 shifted by -1 to shift increments to <multiples of 4 + 1>
+                let want_decimals_weight = 1 + (scale - 1) / 4;
+                let correction_weight = want_decimals_weight - have_decimals_weight;
+                if integer_digits.len() == 0 {
+                    // if we have no integer part, can simply set weight to -
+                    weight -= correction_weight;
+                } else {
+                    // if we do have an integer part, cannot safe space. we'll have to
+                    // prefix the decimal with 0 digits
+                    //
+                    // Note: we append to the integer digits but it's effectively
+                    // creating a prefix for the decimal part
+                    integer_digits
+                        .extend(std::iter::repeat(0_i16).take(correction_weight.try_into()?));
+                }
+
+                let mut digits: Vec<i16> = vec![];
+                digits.extend(integer_digits);
+                digits.extend(decimal_digits);
+                strip_trailing_zeroes(&mut digits);
+
+                let n_digits = digits.len();
+                // 8 bytes for the header (4 * 2byte numbers), + 2 bytes per digit
+                out.reserve(8 + n_digits * 2);
+
+                // write the header
+                out.put_u16(n_digits.try_into()?);
+                out.put_i16(weight);
+                out.put_u16(if neg { 0x4000 } else { 0x0000 });
+                out.put_u16(scale.try_into()?);
+
+                // write the body
+                for digit in digits {
+                    out.put_i16(digit);
+                }
+
+                Ok(IsNull::No)
+            }
         }
-
-        Ok(IsNull::No)
     }
 
     fn accepts(ty: &Type) -> bool {
