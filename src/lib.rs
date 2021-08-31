@@ -2,8 +2,8 @@ use bytes::{BufMut, BytesMut};
 use postgres::types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 use std::convert::TryInto;
 
-use bigdecimal::BigDecimal;
-use num::{BigInt, BigUint, Integer};
+pub use bigdecimal::BigDecimal;
+pub use num::{BigInt, BigUint, Integer};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct PgNumeric {
@@ -11,6 +11,10 @@ pub struct PgNumeric {
 }
 
 impl PgNumeric {
+    pub fn new(n: Option<BigDecimal>) -> Self {
+        Self { n }
+    }
+
     pub fn is_nan(&self) -> bool {
         self.n.is_none()
     }
