@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# set -e
-# set -o pipefail
-
 d=`
 docker run -d \
     -p 15432:5432 \
