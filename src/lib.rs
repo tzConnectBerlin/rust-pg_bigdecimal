@@ -4,6 +4,11 @@ use std::convert::TryInto;
 
 pub use bigdecimal::BigDecimal;
 pub use num::{BigInt, BigUint, Integer};
+#[cfg(feature = "pgnumeric_serde_derive")]
+use std::str::FromStr;
+
+#[cfg(feature = "pgnumeric_serde_derive")]
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct PgNumeric {
@@ -343,5 +348,59 @@ fn integration_tests() {
             n: Some(BigDecimal::from_str(n).unwrap() * BigDecimal::from(-1)),
         };
         test_for_pgnumeric(n);
+    }
+}
+
+#[cfg(feature = "pgnumeric_serde_derive")]
+impl Serialize for PgNumeric {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.n {
+            None => serializer.serialize_none(),
+            Some(bigdecimal) => serializer.serialize_some(&bigdecimal.to_string().as_str()),
+        }
+    }
+}
+
+#[cfg(feature = "pgnumeric_serde_derive")]
+impl<'a> Deserialize<'a> for PgNumeric {
+    fn deserialize<D>(deserializer: D) -> Result<PgNumeric, D::Error>
+    where
+        D: Deserializer<'a>,
+    {
+        struct BigDecimalVisitor {}
+        impl<'de> serde::de::Visitor<'de> for BigDecimalVisitor {
+            type Value = Option<BigDecimal>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "a string that is parseable as a bigdecimal",)
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Some(BigDecimal::from_str(s).unwrap()))
+            }
+
+            fn visit_some<D>(self, d: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                d.deserialize_str(BigDecimalVisitor {})
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(None)
+            }
+        }
+
+        let n = deserializer.deserialize_option(BigDecimalVisitor {})?;
+        Ok(PgNumeric { n })
     }
 }

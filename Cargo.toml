@@ -16,3 +16,8 @@ bigdecimal = "0.3.0"
 byteorder = "1.4.3"
 num = "0.4"
 postgres = "0.19.1"
+serde = { version = "1.0.125", features = [ "derive" ] }
+serde_derive = "1.0.125"
+
+[features]
+pgnumeric_serde_derive = []
