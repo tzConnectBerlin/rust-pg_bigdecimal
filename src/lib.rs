@@ -300,11 +300,25 @@ fn integration_tests() {
             .execute("INSERT INTO foobar VALUES ($1)", &[&pgnumeric])
             .unwrap();
 
-        let got: Option<PgNumeric> = dbconn
+        let got: PgNumeric = dbconn
             .query_one("SELECT n FROM foobar", &[])
             .unwrap()
-            .get(0);
-        assert_eq!(pgnumeric, got.unwrap());
+            .get::<usize, Option<PgNumeric>>(0)
+            .unwrap();
+        assert_eq!(pgnumeric, got);
+
+        let got_as_str: String = dbconn
+            .query_one("SELECT n::text FROM foobar", &[])
+            .unwrap()
+            .get::<usize, Option<String>>(0)
+            .unwrap();
+        let got = match got_as_str.as_str() {
+            "NaN" => PgNumeric { n: None },
+            s => PgNumeric {
+                n: Some(BigDecimal::from_str(s).unwrap()),
+            },
+        };
+        assert_eq!(pgnumeric, got);
     };
 
     let tests = &[
