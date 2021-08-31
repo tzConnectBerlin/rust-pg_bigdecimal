@@ -1,7 +1,7 @@
 [package]
 name = "pg_bigdecimal"
 description = "Postgres' numeric <=> Rust's BigDecimal"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Rick Klomp <rick.klomp@tzconnect.com>"]
 edition = "2018"
 license = "MIT"
@@ -16,8 +16,4 @@ bigdecimal = "0.3.0"
 byteorder = "1.4.3"
 num = "0.4"
 postgres = "0.19.1"
-serde = { version = "1.0.125", features = [ "derive" ] }
-serde_derive = "1.0.125"
-
-[features]
-pgnumeric_serde_derive = []
+serde = { version = "1.0.125", optional = true }

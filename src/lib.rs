@@ -4,10 +4,10 @@ use std::convert::TryInto;
 
 pub use bigdecimal::BigDecimal;
 pub use num::{BigInt, BigUint, Integer};
-#[cfg(feature = "pgnumeric_serde_derive")]
+#[cfg(feature = "serde")]
 use std::str::FromStr;
 
-#[cfg(feature = "pgnumeric_serde_derive")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
@@ -351,7 +351,7 @@ fn integration_tests() {
     }
 }
 
-#[cfg(feature = "pgnumeric_serde_derive")]
+#[cfg(feature = "serde")]
 impl Serialize for PgNumeric {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -364,7 +364,7 @@ impl Serialize for PgNumeric {
     }
 }
 
-#[cfg(feature = "pgnumeric_serde_derive")]
+#[cfg(feature = "serde")]
 impl<'a> Deserialize<'a> for PgNumeric {
     fn deserialize<D>(deserializer: D) -> Result<PgNumeric, D::Error>
     where
