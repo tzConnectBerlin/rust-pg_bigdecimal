@@ -66,44 +66,28 @@ impl ToSql for PgNumeric {
         _: &Type,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + 'static + Sync + Send>> {
-        fn base10000(
-            mut n: BigUint,
-        ) -> Result<Vec<i16>, Box<dyn std::error::Error + 'static + Sync + Send>> {
-            let mut res: Vec<i16> = vec![];
-
-            while n != BigUint::from(0_u32) {
-                let (remainder, digit) = n.div_rem(&BigUint::from(10_000u32));
-                res.push(digit.try_into()?);
-                n = remainder;
-            }
-
-            res.reverse();
-            Ok(res)
+        fn write_header(out: &mut BytesMut, n_digits: u16, weight: i16, sign: u16, scale: u16) {
+            out.put_u16(n_digits);
+            out.put_i16(weight);
+            out.put_u16(sign);
+            out.put_u16(scale);
         }
-        fn strip_trailing_zeroes(digits: &mut Vec<i16>) {
-            let mut last_nonzero_idx = 0;
-            for (i, d) in digits.iter().enumerate().rev() {
-                last_nonzero_idx = i;
-                if *d != 0 {
-                    break;
-                }
+        fn write_body(out: &mut BytesMut, digits: &[i16]) {
+            // write the body
+            for digit in digits {
+                out.put_i16(*digit);
             }
-            digits.truncate(last_nonzero_idx + 1);
+        }
+        fn write_nan(out: &mut BytesMut) {
+            // 8 bytes for the header (4 * 2byte numbers)
+            out.reserve(8);
+            write_header(out, 0, 0, 0xC000, 0);
+            // no body for nan
         }
 
         match &self.n {
             None => {
-                // 8 bytes for the header (4 * 2byte numbers)
-                out.reserve(8);
-
-                // write the header
-                out.put_u16(0);
-                out.put_i16(0);
-                out.put_u16(0xC000);
-                out.put_u16(0);
-
-                // no body for nan
-
+                write_nan(out);
                 Ok(IsNull::No)
             }
             Some(n) => {
@@ -116,15 +100,17 @@ impl ToSql for PgNumeric {
                 let integer_digits: Vec<i16> = base10000(integer)?;
                 let mut weight = integer_digits.len().try_into().map(|len: i16| len - 1)?;
 
-                // must shift decimal part to align the decimal point between 2 10000
-                // based digits.
-                // shifted modulo by 1 (resulting in (0..4] instead of [0..4) ranges)
+                // must shift decimal part to align the decimal point between
+                // two 10000 based digits.
+                // note: shifted modulo by 1
+                //       (resulting in 1..4 instead of 0..3 ranges)
                 let decimal =
                     decimal * BigUint::from(10_u32).pow((4 - ((scale - 1) % 4 + 1)) as u32);
-                let decimal_digits = base10000(decimal)?;
+                let decimal_digits: Vec<i16> = base10000(decimal)?;
 
                 let have_decimals_weight: i16 = decimal_digits.len().try_into()?;
-                // /4 shifted by -1 to shift increments to <multiples of 4 + 1>
+                // the /4 is shifted by -1 to shift increments to
+                // <multiples of 4 + 1>
                 let want_decimals_weight = 1 + (scale - 1) / 4;
                 let correction_weight = want_decimals_weight - have_decimals_weight;
                 let mut decimal_zeroes_prefix: Vec<i16> = vec![];
@@ -132,8 +118,8 @@ impl ToSql for PgNumeric {
                     // if we have no integer part, can simply set weight to -
                     weight -= correction_weight;
                 } else {
-                    // if we do have an integer part, cannot safe space. we'll have to
-                    // prefix the decimal with 0 digits
+                    // if we do have an integer part, cannot save space.
+                    //  we'll have to prefix the decimal part with 0 digits
                     decimal_zeroes_prefix = std::iter::repeat(0_i16)
                         .take(correction_weight.try_into()?)
                         .collect();
@@ -144,22 +130,21 @@ impl ToSql for PgNumeric {
                 digits.extend(decimal_zeroes_prefix);
                 digits.extend(decimal_digits);
                 strip_trailing_zeroes(&mut digits);
-
                 let n_digits = digits.len();
+
                 // 8 bytes for the header (4 * 2byte numbers)
                 // + 2 bytes per digit
                 out.reserve(8 + n_digits * 2);
 
-                // write the header
-                out.put_u16(n_digits.try_into()?);
-                out.put_i16(weight);
-                out.put_u16(if neg { 0x4000 } else { 0x0000 });
-                out.put_u16(scale.try_into()?);
+                write_header(
+                    out,
+                    n_digits.try_into()?,
+                    weight,
+                    if neg { 0x4000 } else { 0x0000 },
+                    scale.try_into()?,
+                );
 
-                // write the body
-                for digit in digits {
-                    out.put_i16(digit);
-                }
+                write_body(out, &digits);
 
                 Ok(IsNull::No)
             }
@@ -173,13 +158,125 @@ impl ToSql for PgNumeric {
     to_sql_checked!();
 }
 
+fn base10000(
+    mut n: BigUint,
+) -> Result<Vec<i16>, Box<dyn std::error::Error + 'static + Sync + Send>> {
+    let mut res: Vec<i16> = vec![];
+
+    while n != BigUint::from(0_u32) {
+        let (remainder, digit) = n.div_rem(&BigUint::from(10_000u32));
+        res.push(digit.try_into()?);
+        n = remainder;
+    }
+
+    res.reverse();
+    Ok(res)
+}
+
+fn strip_trailing_zeroes(digits: &mut Vec<i16>) {
+    let mut truncate_at = 0;
+    for (i, d) in digits.iter().enumerate().rev() {
+        if *d != 0 {
+            truncate_at = i + 1;
+            break;
+        }
+    }
+    digits.truncate(truncate_at);
+}
+
 #[test]
-fn integration() {
+fn strip_trailing_zeroes_tests() {
+    struct TestCase {
+        inp: Vec<i16>,
+        exp: Vec<i16>,
+    }
+    let test_cases: Vec<TestCase> = vec![
+        TestCase {
+            inp: vec![],
+            exp: vec![],
+        },
+        TestCase {
+            inp: vec![10, 5, 105],
+            exp: vec![10, 5, 105],
+        },
+        TestCase {
+            inp: vec![10, 5, 105, 0, 0, 0],
+            exp: vec![10, 5, 105],
+        },
+        TestCase {
+            inp: vec![0, 10, 0, 0, 5, 0, 105, 0, 0, 0],
+            exp: vec![0, 10, 0, 0, 5, 0, 105],
+        },
+        TestCase {
+            inp: vec![0],
+            exp: vec![],
+        },
+    ];
+
+    for tc in test_cases {
+        let mut got = tc.inp.clone();
+        strip_trailing_zeroes(&mut got);
+        assert_eq!(tc.exp, got);
+    }
+}
+
+#[test]
+fn base10000_tests() {
+    struct TestCase {
+        inp: BigUint,
+        exp: Vec<i16>,
+    }
+    let test_cases: Vec<TestCase> = vec![
+        TestCase {
+            inp: BigUint::parse_bytes(b"0", 10).unwrap(),
+            exp: vec![],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"1", 10).unwrap(),
+            exp: vec![1],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"10", 10).unwrap(),
+            exp: vec![10],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"100", 10).unwrap(),
+            exp: vec![100],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"1000", 10).unwrap(),
+            exp: vec![1000],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"9999", 10).unwrap(),
+            exp: vec![9999],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"10000", 10).unwrap(),
+            exp: vec![1, 0],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"100000000", 10).unwrap(),
+            exp: vec![1, 0, 0],
+        },
+        TestCase {
+            inp: BigUint::parse_bytes(b"900087000", 10).unwrap(),
+            exp: vec![9, 8, 7000],
+        },
+    ];
+    for tc in test_cases {
+        let got = base10000(tc.inp);
+        assert_eq!(tc.exp, got.unwrap());
+    }
+}
+
+#[test]
+fn integration_tests() {
     use postgres::{Client, NoTls};
     use std::str::FromStr;
 
     let mut dbconn = Client::connect(
-        "host=0.0.0.0 user=test password=test dbname=test port=15432",
+        "host=localhost port=15432 user=test password=test dbname=test",
         NoTls,
     )
     .unwrap();
