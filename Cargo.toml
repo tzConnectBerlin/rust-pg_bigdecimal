@@ -1,7 +1,7 @@
 [package]
 name = "pg_bigdecimal"
 description = "Postgres' numeric <=> Rust's BigDecimal"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Rick Klomp <rick.klomp@tzconnect.com>"]
 edition = "2018"
 license = "MIT"
