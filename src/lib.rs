@@ -10,16 +10,25 @@ use std::str::FromStr;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// A rust variant of the Postgres Numeric type. The full spectrum of Postgres'
+/// Numeric value range is supported.
+///
+/// Represented as an Optional BigDecimal. None for 'NaN', Some(bigdecimal) for
+/// all other values.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub struct PgNumeric {
     pub n: Option<BigDecimal>,
 }
 
 impl PgNumeric {
+    /// Construct a new PgNumeric value from an optional BigDecimal
+    /// (None for NaN values).
     pub fn new(n: Option<BigDecimal>) -> Self {
         Self { n }
     }
 
+    /// Returns true if this PgNumeric value represents a NaN value.
+    /// Otherwise returns false.
     pub fn is_nan(&self) -> bool {
         self.n.is_none()
     }
