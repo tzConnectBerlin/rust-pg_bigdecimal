@@ -13,5 +13,5 @@ With `None` representing the Postgres Numeric value `NaN`, and all `Some(..)` re
 
 ## Comparisons between similar packages
 
-- https://crates.io/crates/rust-decimal provides a rust native type, however it's represented as a 96 bit integer number + scaling bits + 1 sign bit. 
+- https://crates.io/crates/rust-decimal provides a rust native type, however it's represented as a 96 bit integer number + scaling bits + 1 sign bit.
 This means that "only" (quoting only here because it is still a large integer space) a small part of Postgres' Numeric values can be translated. In our case it was not sufficient.
