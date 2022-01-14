@@ -1,5 +1,7 @@
 # rust-pg_bigdecimal
 
+This package can be found at crates.io here: https://crates.io/crates/pg_bigdecimal.
+
 This implements a Rust datatype for the Postgres Numeric type (ie the types listed in https://www.postgresql.org/docs/13/datatype-numeric.html under "decimal"/"numeric"), to be used with Rust's "Postgres" library.
 The full spectrum of Postgres' Numeric value range is supported.
 
