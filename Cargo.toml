@@ -3,7 +3,7 @@ name = "pg_bigdecimal"
 description = "Postgres' numeric <=> Rust's BigDecimal"
 readme = "README.md"
 repository = "https://github.com/tzConnectBerlin/rust-pg_bigdecimal"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Rick Klomp <rick.klomp@tzconnect.com>"]
 edition = "2018"
 license = "MIT"
@@ -13,9 +13,9 @@ include = ["/src", "/test_with_tempdb.bash"]
 publish = true
 
 [dependencies]
-bytes = "1.1.0"
-bigdecimal = "0.3.0"
-byteorder = "1.4.3"
+bytes = "1.2"
+bigdecimal = "0.3"
+byteorder = "1.4"
 num = "0.4"
-postgres = "0.19.1"
-serde = { version = "1.0.125", optional = true }
+postgres = "0.19"
+serde = { version = "1.0.144", optional = true }
